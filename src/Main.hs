@@ -110,18 +110,19 @@ renderPage conf pg@Gitit.Page { .. } = Pandoc.writeHtmlString writerOpts pandoc
         Gitit.DocBook    -> Pandoc.readDocBook
         Gitit.MediaWiki  -> Pandoc.readMediaWiki
 
-getLocalPath :: BS.ByteString -> Maybe FilePath
-getLocalPath req
+getLocalPath :: FrontitConf -> BS.ByteString -> Maybe FilePath
+getLocalPath conf req
   | BS.any (== '.') req = Nothing
-  | req == "/" = Just ("Index.page")
+  | req == "/" = Just (Gitit.frontPage (fcGititConfig conf) <> ".page")
   | otherwise = Just (BS.unpack (req <> ".page"))
 
 app :: FrontitConf -> Wai.Application
 app conf = \ req respond -> do
   let respond' st pg = respond (Wai.responseLBS st [] (LBS.pack pg))
-  case getLocalPath (Wai.rawPathInfo req) of
+  case getLocalPath conf (Wai.rawPathInfo req) of
     Nothing -> respond' Http.status403 "invalid URL"
     Just path -> do
+      putStrLn ("fetching: " <> path)
       result <- fetchPage conf path
       case result of
         Found pg -> respond' Http.status200 (renderPage conf pg)
