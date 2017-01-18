@@ -6,6 +6,8 @@ import qualified Data.ByteString.Char8 as BS
 import qualified Data.ByteString.Lazy.Char8 as LBS
 import           Data.Default (def)
 import           Data.Monoid ((<>))
+import qualified Data.Time.Clock as Time
+import qualified Data.Time.Format as Time
 import qualified Network.Gitit.Config as Gitit
 import qualified Network.Gitit.Page as Gitit
 import qualified Network.Gitit.Types as Gitit
@@ -18,6 +20,7 @@ import qualified System.Environment as Env
 import qualified System.Exit as Exit
 import           System.FilePath ((</>), makeRelative)
 import qualified Text.Pandoc as Pandoc
+import           Text.Printf (printf)
 
 data FrontitOpts = FrontitOpts
   { optPort        :: Int
@@ -90,6 +93,19 @@ fetchPage conf path = do
         Just "yes" -> return (Found pg)
         _          -> return Private
 
+convertLinks :: Pandoc.Inline -> Pandoc.Inline
+convertLinks link@(Pandoc.Link as name ("",title)) =
+  case flatten name of
+    Nothing -> link
+    Just text -> Pandoc.Link as name (text, title)
+convertLinks rs = rs
+
+flatten :: [Pandoc.Inline] -> Maybe String
+flatten = fmap mconcat . sequence . fmap go
+  where go (Pandoc.Str s) = Just s
+        go Pandoc.Space   = Just " "
+        go _              = Nothing
+
 renderPage :: FrontitConf -> Gitit.Page -> String
 renderPage conf pg@Gitit.Page { .. } = Pandoc.writeHtmlString writerOpts pandoc
   where
@@ -97,18 +113,18 @@ renderPage conf pg@Gitit.Page { .. } = Pandoc.writeHtmlString writerOpts pandoc
                      , Pandoc.writerStandalone = True
                      }
     rawPage = Gitit.pageToString (fcGititConfig conf) pg
-    pandoc = Pandoc.handleError (reader def rawPage)
-    reader =
+    pandoc = Pandoc.bottomUp convertLinks (Pandoc.handleError parsed)
+    parsed =
       case pageFormat of
-        Gitit.Markdown   -> Pandoc.readMarkdown
-        Gitit.CommonMark -> Pandoc.readCommonMark
-        Gitit.RST        -> Pandoc.readRST
-        Gitit.LaTeX      -> Pandoc.readLaTeX
-        Gitit.HTML       -> Pandoc.readHtml
-        Gitit.Textile    -> Pandoc.readTextile
-        Gitit.Org        -> Pandoc.readOrg
-        Gitit.DocBook    -> Pandoc.readDocBook
-        Gitit.MediaWiki  -> Pandoc.readMediaWiki
+        Gitit.Markdown   -> Pandoc.readMarkdown def rawPage
+        Gitit.CommonMark -> Pandoc.readCommonMark def rawPage
+        Gitit.RST        -> Pandoc.readRST def pageText
+        Gitit.LaTeX      -> Pandoc.readLaTeX def pageText
+        Gitit.HTML       -> Pandoc.readHtml def pageText
+        Gitit.Textile    -> Pandoc.readTextile def pageText
+        Gitit.Org        -> Pandoc.readOrg def pageText
+        Gitit.DocBook    -> Pandoc.readDocBook def pageText
+        Gitit.MediaWiki  -> Pandoc.readMediaWiki def pageText
 
 getLocalPath :: FrontitConf -> BS.ByteString -> Maybe FilePath
 getLocalPath conf req
@@ -119,15 +135,36 @@ getLocalPath conf req
 app :: FrontitConf -> Wai.Application
 app conf = \ req respond -> do
   let respond' st pg = respond (Wai.responseLBS st [] (LBS.pack pg))
-  case getLocalPath conf (Wai.rawPathInfo req) of
-    Nothing -> respond' Http.status403 "invalid URL"
-    Just path -> do
-      putStrLn ("fetching: " <> path)
-      result <- fetchPage conf path
-      case result of
-        Found pg -> respond' Http.status200 (renderPage conf pg)
-        Private  -> respond' Http.status403 "private page"
-        NotFound -> respond' Http.status404 "not found"
+  if Wai.requestMethod req == "GET"
+    then do
+      case getLocalPath conf (Wai.rawPathInfo req) of
+        Nothing -> respond' Http.status403 "invalid URL"
+        Just path -> do
+          result <- fetchPage conf path
+          case result of
+            Found pg -> respond' Http.status200 (renderPage conf pg)
+            Private  -> respond' Http.status403 "private page"
+            NotFound -> respond' Http.status404 "not found"
+    else respond' Http.status403 "forbidden"
+
+-- Something like this exists in wai-extra, but I don't want to have
+-- to depend on an even bigger set of deps after gitit+pandoc, so
+-- this is a quick reimplementation.
+mkLogger :: Wai.Application -> Wai.Application
+mkLogger app' = \ req respond -> app' req $ \ resp -> do
+  currentTime <- Time.getCurrentTime
+  let time = Time.formatTime
+               Time.defaultTimeLocale
+               "[%d/%b/%Y:%H:%M:%S %z]"
+               currentTime
+  printf "%v - - %v \"%v %v %v\" %v -\n"
+    (show (Wai.remoteHost req))
+    time
+    (BS.unpack (Wai.requestMethod req))
+    (BS.unpack (Wai.rawPathInfo req))
+    (show (Wai.httpVersion req))
+    (Http.statusCode (Wai.responseStatus resp))
+  respond resp
 
 main :: IO ()
 main = do
@@ -138,4 +175,5 @@ main = do
       putStrLn (Opt.usageInfo "frontit" frontitOptDescr)
       Exit.exitFailure
   conf <- optsToConfiguration opts
-  Warp.run (optPort opts) (app conf)
+  printf "running frontit on port %d\n" (optPort opts)
+  Warp.run (optPort opts) (mkLogger (app conf))
