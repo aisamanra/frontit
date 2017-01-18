@@ -8,6 +8,8 @@ import           Data.Default (def)
 import           Data.Monoid ((<>))
 import qualified Data.Time.Clock as Time
 import qualified Data.Time.Format as Time
+import qualified Data.Text as T
+import qualified Data.Text.Encoding as T
 import qualified Network.Gitit.Config as Gitit
 import qualified Network.Gitit.Page as Gitit
 import qualified Network.Gitit.Types as Gitit
@@ -22,11 +24,17 @@ import           System.FilePath ((</>), makeRelative)
 import qualified Text.Pandoc as Pandoc
 import           Text.Printf (printf)
 
+data Protection
+  = PrivateByDefault
+  | PublicByDefault
+    deriving (Eq, Show)
+
 data FrontitOpts = FrontitOpts
   { optPort        :: Int
   , optData        :: Maybe FilePath
   , optGititConfig :: Maybe FilePath
   , optTemplate    :: Maybe FilePath
+  , optProtection  :: Protection
   } deriving (Eq, Show)
 
 defaultOpts :: FrontitOpts
@@ -35,6 +43,7 @@ defaultOpts = FrontitOpts
   , optData        = Nothing
   , optGititConfig = Nothing
   , optTemplate    = Nothing
+  , optProtection  = PrivateByDefault
   }
 
 frontitOptDescr :: [Opt.OptDescr (FrontitOpts -> FrontitOpts)]
@@ -51,6 +60,9 @@ frontitOptDescr =
   , Opt.Option ['t'] ["template"]
       (Opt.ReqArg (\ s opts -> opts { optTemplate = Just s }) "path")
       "The location of the desired HTML template"
+  , Opt.Option ['o'] ["public-by-default"]
+      (Opt.NoArg (\ opts -> opts { optProtection = PublicByDefault}))
+      "Allow all pages to be browsed by default"
   ]
 
 optsToConfiguration :: FrontitOpts -> IO FrontitConf
@@ -64,6 +76,7 @@ optsToConfiguration FrontitOpts { .. } = do
   fcGititConfig <- case optGititConfig of
     Just path -> Gitit.getConfigFromFile path
     Nothing   -> Gitit.getDefaultConfig
+  let fcProtection = optProtection
   return FrontitConf { .. }
 
 defaultTemplate :: String
@@ -73,6 +86,7 @@ data FrontitConf = FrontitConf
   { fcData        :: FilePath
   , fcGititConfig :: Gitit.Config
   , fcTemplate    :: String
+  , fcProtection  :: Protection
   }
 
 data Result
@@ -90,8 +104,10 @@ fetchPage conf path = do
       rawPage <- readFile localPath
       let pg = Gitit.stringToPage (fcGititConfig conf) path rawPage
       case lookup "public" (Gitit.pageMeta pg) of
-        Just "yes" -> return (Found pg)
-        _          -> return Private
+        Just "yes" | fcProtection conf == PrivateByDefault -> return (Found pg)
+        Just "no"  | fcProtection conf == PublicByDefault -> return Private
+        _ | fcProtection conf == PublicByDefault -> return (Found pg)
+          | otherwise -> return Private
 
 convertLinks :: Pandoc.Inline -> Pandoc.Inline
 convertLinks link@(Pandoc.Link as name ("",title)) =
@@ -126,18 +142,18 @@ renderPage conf pg@Gitit.Page { .. } = Pandoc.writeHtmlString writerOpts pandoc
         Gitit.DocBook    -> Pandoc.readDocBook def pageText
         Gitit.MediaWiki  -> Pandoc.readMediaWiki def pageText
 
-getLocalPath :: FrontitConf -> BS.ByteString -> Maybe FilePath
+getLocalPath :: FrontitConf -> T.Text -> Maybe FilePath
 getLocalPath conf req
-  | BS.any (== '.') req = Nothing
-  | req == "/" = Just (Gitit.frontPage (fcGititConfig conf) <> ".page")
-  | otherwise = Just (BS.unpack (req <> ".page"))
+  | T.any (== '.') req = Nothing
+  | req == "" = Just (Gitit.frontPage (fcGititConfig conf) <> ".page")
+  | otherwise = Just (T.unpack (req <> ".page"))
 
 app :: FrontitConf -> Wai.Application
 app conf = \ req respond -> do
-  let respond' st pg = respond (Wai.responseLBS st [] (LBS.pack pg))
+  let respond' st pg = respond (Wai.responseLBS st [] (LBS.fromStrict (T.encodeUtf8 (T.pack pg))))
   if Wai.requestMethod req == "GET"
     then do
-      case getLocalPath conf (Wai.rawPathInfo req) of
+      case getLocalPath conf (T.intercalate ("/") (Wai.pathInfo req)) of
         Nothing -> respond' Http.status403 "invalid URL"
         Just path -> do
           result <- fetchPage conf path
