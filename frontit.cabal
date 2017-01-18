@@ -25,6 +25,7 @@ executable frontit
                      , gitit
                      , http-types
                      , pandoc
+                     , text
                      , time
                      , wai
                      , warp
