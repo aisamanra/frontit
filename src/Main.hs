@@ -16,7 +16,7 @@ import qualified System.Console.GetOpt as Opt
 import qualified System.Directory as Dir
 import qualified System.Environment as Env
 import qualified System.Exit as Exit
-import           System.FilePath ((</>))
+import           System.FilePath ((</>), makeRelative)
 import qualified Text.Pandoc as Pandoc
 
 data FrontitOpts = FrontitOpts
@@ -79,7 +79,7 @@ data Result
 
 fetchPage :: FrontitConf -> FilePath -> IO Result
 fetchPage conf path = do
-  let localPath = fcData conf </> path
+  let localPath = fcData conf </> (makeRelative "/" path)
   exists <- Dir.doesFileExist localPath
   if not exists
     then return NotFound
